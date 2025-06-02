@@ -1,10 +1,14 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useContext } from 'react'
 import { motion } from 'framer-motion'
+import { useSelector } from 'react-redux'
+import { AuthContext } from '../App'
 import MainFeature from '../components/MainFeature'
 import ApperIcon from '../components/ApperIcon'
 
 const Home = () => {
-  const [darkMode, setDarkMode] = useState(false)
+const [darkMode, setDarkMode] = useState(false)
+  const { logout } = useContext(AuthContext)
+  const { isAuthenticated } = useSelector((state) => state.user)
 
   useEffect(() => {
     if (darkMode) {

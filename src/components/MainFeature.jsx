@@ -1,8 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useContext } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'react-toastify'
+import { useSelector } from 'react-redux'
 import { format, isToday, isTomorrow, isThisWeek, isPast } from 'date-fns'
+import { AuthContext } from '../App'
 import ApperIcon from './ApperIcon'
+import taskService from '../services/taskService'
 
 const MainFeature = () => {
   const [tasks, setTasks] = useState([])
@@ -10,6 +13,8 @@ const MainFeature = () => {
   const [filter, setFilter] = useState('all')
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedTask, setSelectedTask] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
   const [formData, setFormData] = useState({
     title: '',
     description: '',
@@ -18,92 +23,140 @@ const MainFeature = () => {
     status: 'pending'
   })
 
-  // Load tasks from localStorage on mount
+  const { logout } = useContext(AuthContext)
+  const { user, isAuthenticated } = useSelector((state) => state.user)
+
+  // Load tasks from backend on mount and when authenticated
   useEffect(() => {
-    const savedTasks = localStorage.getItem('taskflow-tasks')
-    if (savedTasks) {
-      setTasks(JSON.parse(savedTasks))
+    if (isAuthenticated) {
+      loadTasks()
     }
-  }, [])
+  }, [isAuthenticated, filter, searchTerm])
 
-  // Save tasks to localStorage whenever tasks change
-  useEffect(() => {
-    localStorage.setItem('taskflow-tasks', JSON.stringify(tasks))
-  }, [tasks])
+  const loadTasks = async () => {
+    try {
+      setLoading(true)
+      const params = {}
+      
+      if (searchTerm) {
+        params.search = searchTerm
+      }
+      
+      if (filter !== 'all') {
+        if (filter === 'high-priority') {
+          params.priority = 'high'
+        } else if (filter !== 'overdue') {
+          params.status = filter
+        }
+      }
 
-  const handleSubmit = (e) => {
+      const fetchedTasks = await taskService.fetchTasks(params)
+      setTasks(fetchedTasks || [])
+    } catch (error) {
+      console.error('Error loading tasks:', error)
+      toast.error(error.message || 'Failed to load tasks')
+      setTasks([])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleSubmit = async (e) => {
     e.preventDefault()
     if (!formData.title.trim()) {
       toast.error('Please enter a task title')
       return
     }
 
-    const newTask = {
-      id: Date.now().toString(),
-      ...formData,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      completedAt: formData.status === 'completed' ? new Date().toISOString() : null
-    }
+    try {
+      setSubmitting(true)
+      
+      if (selectedTask) {
+        // Update existing task
+        const updatedTask = await taskService.updateTask(selectedTask.id, formData)
+        setTasks(tasks.map(task => 
+          task.id === selectedTask.id ? updatedTask : task
+        ))
+        toast.success('Task updated successfully!')
+        setSelectedTask(null)
+      } else {
+        // Create new task
+        const newTask = await taskService.createTask(formData)
+        setTasks([newTask, ...tasks])
+        toast.success('Task created successfully!')
+      }
 
-    if (selectedTask) {
-      setTasks(tasks.map(task => 
-        task.id === selectedTask.id 
-          ? { ...newTask, id: selectedTask.id, createdAt: selectedTask.createdAt }
-          : task
-      ))
-      toast.success('Task updated successfully!')
-      setSelectedTask(null)
-    } else {
-      setTasks([...tasks, newTask])
-      toast.success('Task created successfully!')
+      setFormData({
+        title: '',
+        description: '',
+        priority: 'medium',
+        dueDate: '',
+        status: 'pending'
+      })
+      setShowAddForm(false)
+    } catch (error) {
+      console.error('Error saving task:', error)
+      toast.error(error.message || 'Failed to save task')
+    } finally {
+      setSubmitting(false)
     }
-
-    setFormData({
-      title: '',
-      description: '',
-      priority: 'medium',
-      dueDate: '',
-      status: 'pending'
-    })
-    setShowAddForm(false)
   }
 
   const handleEdit = (task) => {
     setSelectedTask(task)
     setFormData({
-      title: task.title,
-      description: task.description,
-      priority: task.priority,
-      dueDate: task.dueDate,
-      status: task.status
+      title: task.title || '',
+      description: task.description || '',
+      priority: task.priority || 'medium',
+      dueDate: task.dueDate || '',
+      status: task.status || 'pending'
     })
     setShowAddForm(true)
   }
 
-  const handleDelete = (taskId) => {
-    setTasks(tasks.filter(task => task.id !== taskId))
-    toast.success('Task deleted successfully!')
+  const handleDelete = async (taskId) => {
+    if (!window.confirm('Are you sure you want to delete this task?')) {
+      return
+    }
+
+    try {
+      setLoading(true)
+      await taskService.deleteTask(taskId)
+      setTasks(tasks.filter(task => task.id !== taskId))
+      toast.success('Task deleted successfully!')
+    } catch (error) {
+      console.error('Error deleting task:', error)
+      toast.error(error.message || 'Failed to delete task')
+    } finally {
+      setLoading(false)
+    }
   }
 
-  const toggleTaskStatus = (taskId) => {
-    setTasks(tasks.map(task => {
-      if (task.id === taskId) {
-        const newStatus = task.status === 'completed' ? 'pending' : 'completed'
-        return {
-          ...task,
-          status: newStatus,
-          completedAt: newStatus === 'completed' ? new Date().toISOString() : null,
-          updatedAt: new Date().toISOString()
-        }
+  const toggleTaskStatus = async (taskId) => {
+    const task = tasks.find(t => t.id === taskId)
+    if (!task) return
+
+    try {
+      const newStatus = task.status === 'completed' ? 'pending' : 'completed'
+      const updatedTaskData = {
+        ...task,
+        status: newStatus,
+        completedAt: newStatus === 'completed' ? new Date().toISOString() : null
       }
-      return task
-    }))
+
+      const updatedTask = await taskService.updateTask(taskId, updatedTaskData)
+      setTasks(tasks.map(t => t.id === taskId ? updatedTask : t))
+      toast.success(`Task marked as ${newStatus}`)
+    } catch (error) {
+      console.error('Error updating task status:', error)
+      toast.error(error.message || 'Failed to update task status')
+    }
   }
 
   const filteredTasks = tasks.filter(task => {
-    const matchesSearch = task.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         task.description.toLowerCase().includes(searchTerm.toLowerCase())
+    const matchesSearch = !searchTerm || 
+      task.title?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      task.description?.toLowerCase().includes(searchTerm.toLowerCase())
     
     if (!matchesSearch) return false
     
@@ -149,8 +202,56 @@ const MainFeature = () => {
     overdue: tasks.filter(t => t.dueDate && isPast(new Date(t.dueDate)) && t.status !== 'completed').length
   }
 
+  // Show authentication required message if not authenticated
+  if (!isAuthenticated) {
+    return (
+      <div className="space-y-6 sm:space-y-8">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="glass-panel rounded-xl p-8 sm:p-12 text-center"
+        >
+          <div className="neu-button w-16 h-16 sm:w-20 sm:h-20 mx-auto mb-4 flex items-center justify-center">
+            <ApperIcon name="Lock" className="h-8 w-8 sm:h-10 sm:w-10 text-surface-400" />
+          </div>
+          <h3 className="text-lg sm:text-xl font-semibold text-surface-900 dark:text-white mb-2">
+            Authentication Required
+          </h3>
+          <p className="text-surface-600 dark:text-surface-400">
+            Please log in to access your tasks and manage your workflow.
+          </p>
+        </motion.div>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-6 sm:space-y-8">
+      {/* User Welcome & Logout */}
+      <motion.div 
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="glass-panel rounded-xl p-4 sm:p-6"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <h2 className="text-xl sm:text-2xl font-bold text-surface-900 dark:text-white">
+              Welcome back, {user?.firstName || user?.name || 'User'}!
+            </h2>
+            <p className="text-surface-600 dark:text-surface-400">
+              Manage your tasks and stay organized
+            </p>
+          </div>
+          <button
+            onClick={logout}
+            className="neu-button px-4 py-2 text-surface-600 hover:text-surface-800 dark:text-surface-400 dark:hover:text-surface-200 transition-colors duration-200 rounded-xl flex items-center space-x-2"
+          >
+            <ApperIcon name="LogOut" className="h-5 w-5" />
+            <span>Logout</span>
+          </button>
+        </div>
+      </motion.div>
+
       {/* Header Stats */}
       <motion.div 
         initial={{ opacity: 0, y: 20 }}
@@ -158,7 +259,7 @@ const MainFeature = () => {
         className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6"
       >
         {[
-          { label: 'Total Tasks', value: stats.total, icon: 'List', color: 'primary' },
+          { label: 'Total Tasks', value: stats.total, icon: 'List', color: 'blue' },
           { label: 'Completed', value: stats.completed, icon: 'CheckCircle2', color: 'green' },
           { label: 'Pending', value: stats.pending, icon: 'Clock', color: 'yellow' },
           { label: 'Overdue', value: stats.overdue, icon: 'AlertCircle', color: 'red' }
@@ -239,9 +340,10 @@ const MainFeature = () => {
                 status: 'pending'
               })
             }}
-            className="neu-button px-4 sm:px-6 py-2 sm:py-3 text-primary-600 hover:text-primary-700 transition-colors duration-200 rounded-xl flex items-center space-x-2 font-medium"
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+            disabled={loading}
+            className="neu-button px-4 sm:px-6 py-2 sm:py-3 text-primary-600 hover:text-primary-700 transition-colors duration-200 rounded-xl flex items-center space-x-2 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+            whileHover={{ scale: loading ? 1 : 1.02 }}
+            whileTap={{ scale: loading ? 1 : 0.98 }}
           >
             <ApperIcon name="Plus" className="h-5 w-5" />
             <span className="hidden sm:inline">Add Task</span>
@@ -258,7 +360,7 @@ const MainFeature = () => {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
-            onClick={() => setShowAddForm(false)}
+            onClick={() => !submitting && setShowAddForm(false)}
           >
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
@@ -272,8 +374,9 @@ const MainFeature = () => {
                   {selectedTask ? 'Edit Task' : 'Add New Task'}
                 </h3>
                 <button
-                  onClick={() => setShowAddForm(false)}
-                  className="neu-button p-2 rounded-xl"
+                  onClick={() => !submitting && setShowAddForm(false)}
+                  disabled={submitting}
+                  className="neu-button p-2 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <ApperIcon name="X" className="h-5 w-5 text-surface-500" />
                 </button>
@@ -288,7 +391,8 @@ const MainFeature = () => {
                     type="text"
                     value={formData.title}
                     onChange={(e) => setFormData({...formData, title: e.target.value})}
-                    className="w-full px-4 py-3 border border-surface-200 dark:border-surface-700 rounded-xl bg-white dark:bg-surface-800 text-surface-900 dark:text-white placeholder-surface-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200"
+                    disabled={submitting}
+                    className="w-full px-4 py-3 border border-surface-200 dark:border-surface-700 rounded-xl bg-white dark:bg-surface-800 text-surface-900 dark:text-white placeholder-surface-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
                     placeholder="Enter task title"
                     required
                   />
@@ -301,8 +405,9 @@ const MainFeature = () => {
                   <textarea
                     value={formData.description}
                     onChange={(e) => setFormData({...formData, description: e.target.value})}
+                    disabled={submitting}
                     rows={3}
-                    className="w-full px-4 py-3 border border-surface-200 dark:border-surface-700 rounded-xl bg-white dark:bg-surface-800 text-surface-900 dark:text-white placeholder-surface-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200 resize-none"
+                    className="w-full px-4 py-3 border border-surface-200 dark:border-surface-700 rounded-xl bg-white dark:bg-surface-800 text-surface-900 dark:text-white placeholder-surface-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200 resize-none disabled:opacity-50 disabled:cursor-not-allowed"
                     placeholder="Enter task description"
                   />
                 </div>
@@ -315,7 +420,8 @@ const MainFeature = () => {
                     <select
                       value={formData.priority}
                       onChange={(e) => setFormData({...formData, priority: e.target.value})}
-                      className="w-full px-4 py-3 border border-surface-200 dark:border-surface-700 rounded-xl bg-white dark:bg-surface-800 text-surface-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200"
+                      disabled={submitting}
+                      className="w-full px-4 py-3 border border-surface-200 dark:border-surface-700 rounded-xl bg-white dark:bg-surface-800 text-surface-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <option value="low">Low</option>
                       <option value="medium">Medium</option>
@@ -331,7 +437,8 @@ const MainFeature = () => {
                     <select
                       value={formData.status}
                       onChange={(e) => setFormData({...formData, status: e.target.value})}
-                      className="w-full px-4 py-3 border border-surface-200 dark:border-surface-700 rounded-xl bg-white dark:bg-surface-800 text-surface-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200"
+                      disabled={submitting}
+                      className="w-full px-4 py-3 border border-surface-200 dark:border-surface-700 rounded-xl bg-white dark:bg-surface-800 text-surface-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <option value="pending">Pending</option>
                       <option value="in-progress">In Progress</option>
@@ -348,7 +455,8 @@ const MainFeature = () => {
                     type="date"
                     value={formData.dueDate}
                     onChange={(e) => setFormData({...formData, dueDate: e.target.value})}
-                    className="w-full px-4 py-3 border border-surface-200 dark:border-surface-700 rounded-xl bg-white dark:bg-surface-800 text-surface-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200"
+                    disabled={submitting}
+                    className="w-full px-4 py-3 border border-surface-200 dark:border-surface-700 rounded-xl bg-white dark:bg-surface-800 text-surface-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
                   />
                 </div>
 
@@ -356,15 +464,18 @@ const MainFeature = () => {
                   <button
                     type="button"
                     onClick={() => setShowAddForm(false)}
-                    className="flex-1 px-6 py-3 border border-surface-200 dark:border-surface-700 rounded-xl text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-700 transition-colors duration-200 font-medium"
+                    disabled={submitting}
+                    className="flex-1 px-6 py-3 border border-surface-200 dark:border-surface-700 rounded-xl text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-700 transition-colors duration-200 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
-                    className="flex-1 px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white rounded-xl transition-colors duration-200 font-medium"
+                    disabled={submitting}
+                    className="flex-1 px-6 py-3 bg-primary text-white rounded-xl hover:bg-primary-dark transition-colors duration-200 font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
                   >
-                    {selectedTask ? 'Update' : 'Create'} Task
+                    {submitting && <ApperIcon name="Loader2" className="h-4 w-4 animate-spin" />}
+                    <span>{selectedTask ? 'Update' : 'Create'} Task</span>
                   </button>
                 </div>
               </form>
@@ -380,7 +491,21 @@ const MainFeature = () => {
         transition={{ delay: 0.4 }}
         className="space-y-4"
       >
-        {filteredTasks.length === 0 ? (
+        {loading ? (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="glass-panel rounded-xl p-8 sm:p-12 text-center"
+          >
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+            <h3 className="text-lg sm:text-xl font-semibold text-surface-900 dark:text-white mb-2">
+              Loading tasks...
+            </h3>
+            <p className="text-surface-600 dark:text-surface-400">
+              Please wait while we fetch your tasks
+            </p>
+          </motion.div>
+        ) : filteredTasks.length === 0 ? (
           <motion.div 
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -413,7 +538,8 @@ const MainFeature = () => {
                   {/* Task Status Checkbox */}
                   <button
                     onClick={() => toggleTaskStatus(task.id)}
-                    className={`flex-shrink-0 w-6 h-6 rounded-lg border-2 flex items-center justify-center transition-all duration-200 ${
+                    disabled={loading}
+                    className={`flex-shrink-0 w-6 h-6 rounded-lg border-2 flex items-center justify-center transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed ${
                       task.status === 'completed'
                         ? 'bg-green-500 border-green-500 text-white'
                         : 'border-surface-300 dark:border-surface-600 hover:border-primary-500'
@@ -480,13 +606,15 @@ const MainFeature = () => {
                       <div className="flex items-center space-x-2">
                         <button
                           onClick={() => handleEdit(task)}
-                          className="neu-button p-2 rounded-lg hover:bg-surface-50 dark:hover:bg-surface-700 transition-colors duration-200"
+                          disabled={loading}
+                          className="neu-button p-2 rounded-lg hover:bg-surface-50 dark:hover:bg-surface-700 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           <ApperIcon name="Edit2" className="h-4 w-4 text-surface-600 dark:text-surface-400" />
                         </button>
                         <button
                           onClick={() => handleDelete(task.id)}
-                          className="neu-button p-2 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors duration-200"
+                          disabled={loading}
+                          className="neu-button p-2 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           <ApperIcon name="Trash2" className="h-4 w-4 text-red-600 dark:text-red-400" />
                         </button>
